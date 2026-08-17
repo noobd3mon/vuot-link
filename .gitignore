@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Chrome profile (local)
+.vuot-link-profile/
+profile/
+data/
+
+# Logs / env
+*.log
+.env
+.DS_Store

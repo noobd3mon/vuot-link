@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+docs/
+*.md
+.DS_Store
+# KHÔNG đưa profile local lên image:
+.vuot-link-profile/
+profile/
+data/
