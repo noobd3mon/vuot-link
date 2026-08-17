@@ -99,6 +99,15 @@ def is_interstitial(url: str) -> bool:
     return any(host == h or host.endswith("." + h) for h in INTER_HOSTS)
 
 
+def is_error_page(page) -> bool:
+    """Trang đang là error page của Chrome (navigation lỗi, vd ERR_UNEXPECTED = 'error code 9')."""
+    try:
+        u = (page.url or "").lower()
+    except Exception:
+        u = ""
+    return u.startswith("chrome-error://") or "chromewebdata" in u
+
+
 def find_browser() -> str:
     for c in BROWSER_CANDIDATES:
         if c and os.path.exists(c):
@@ -406,16 +415,45 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
         pass
 
     try:
-        log(f"→ Mở: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # Mở link đầu với retry: proxy/redirect lần đầu hay gặp error page
+        # (ERR_UNEXPECTED = "error code 9"); reload lại thì vào bình thường.
+        for attempt in range(1, 4):
+            try:
+                log(f"→ Mở: {url}" + (f" (thử {attempt})" if attempt > 1 else ""))
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                log(f"  ! goto lỗi: {e!r}")
+            if not is_error_page(page):
+                break
+            log(f"  ~ error page (code) — reload thử {attempt}/3 ...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                log(f"  ! reload lỗi: {e!r}")
+            time.sleep(2)
+
         deadline = time.time() + args.timeout
         last_sig = None
         stall = 0
         stage = 0
         last_clicked_sig = None
         same_clicks = 0
+        error_reloads = 0
 
         while time.time() < deadline:
+            # Tự phục hồi nếu trang rơi vào error page giữa chừng.
+            if is_error_page(page):
+                error_reloads += 1
+                if error_reloads > 6:
+                    log("  ! error page liên tục — dừng auto.")
+                    break
+                log(f"  ~ error page giữa chừng — reload ({error_reloads}) ...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception as e:
+                    log(f"  ! reload lỗi: {e!r}")
+                time.sleep(2)
+                continue
             d = find_dest_in_pages(ctx) or found["url"]
             if d:
                 return d
