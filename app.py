@@ -18,7 +18,7 @@ datacenter, hoặc bật NOVNC=1 (đã sẵn trong Dockerfile) để manual mode
 Env:
   PORT        cổng HTTP (Railway tự set, mặc định 8080)
   PROXY       proxy cho Chrome, vd http://user:pass@host:port  (residential!)
-  PROFILE_DIR thư mục profile Chrome (mặc định /data/profile — mount volume)
+  PROFILE_DIR thư mục profile Chrome (mặc định ~/.vuot-link-profile khi local; /data/profile khi Docker/Railway)
   TIMEOUT     giây giới hạn mỗi link (mặc định 240 — có cả thời gian chờ manual)
   NOVNC       "1" bật noVNC (manual mode remote; Dockerfile đã set sẵn)
   NOVNC_DIR   thư mục static noVNC (mặc định /usr/share/novnc)
@@ -39,7 +39,8 @@ app = FastAPI(title="Vượt link cuty.io / shrinkme.click")
 # Một link lúc (Chrome tốn RAM). Lock async toàn app, dùng cho cả job manual lẫn /api.
 _LOCK = asyncio.Lock()
 
-PROFILE_DIR = os.environ.get("PROFILE_DIR", "/data/profile")
+# None → bypass_url tự dùng ~/.vuot-link-profile (local). Railway/Docker set env PROFILE_DIR=/data/profile.
+PROFILE_DIR = os.environ.get("PROFILE_DIR") or None
 PROXY = os.environ.get("PROXY") or None
 TIMEOUT = float(os.environ.get("TIMEOUT", "240"))
 NOVNC = os.environ.get("NOVNC", "") == "1"     # bật noVNC (Railway/Docker) cho manual remote
@@ -70,6 +71,8 @@ _STATE = {
 _GATE: "WebManualGate | None" = None
 # Giữ reference task để tránh GC (Python docs: task không có ref có bị thu gom).
 _current_task: "asyncio.Task | None" = None
+_cancel_event = threading.Event()
+_proc_holder = {}
 
 
 class WebManualGate(ManualGate):
@@ -99,9 +102,17 @@ def _reset_state(url):
     )
 
 
+def _set_idle():
+    _STATE.update(
+        status="idle", url=None, destination=None, raw_text=None,
+        error=None, manual_msg=None, log=[],
+    )
+
+
 async def _job(url: str, manual: bool):
     global _GATE
     async with _LOCK:
+        _cancel_event.clear()
         _reset_state(url)
         gate = WebManualGate(_log) if manual else None
         _GATE = gate
@@ -112,6 +123,7 @@ async def _job(url: str, manual: bool):
                 headless=False, invisible=False, proxy=PROXY,
                 timeout=TIMEOUT, manual=manual, no_text=False,
                 log=_log, manual_gate=gate,
+                cancel_event=_cancel_event, proc_holder=_proc_holder,
             )
             if dest:
                 _STATE["status"] = "done"
@@ -179,6 +191,7 @@ async function status(){
     let h='';
     if(j.status==='running'||j.status==='needs_manual'){
       h+='<div class="muted">Đang chạy... '+esc(j.url||'')+'</div>';
+      h+='<button onclick="cancel()" style="margin-top:8px;background:#dc2626">Hủy</button>';
     }
     if(j.status==='needs_manual'){
       h+='<div class="manual"><b>Cần giải captcha thủ công</b><br>'+esc(j.manual_msg||'')+'<br>';
@@ -203,6 +216,11 @@ async function status(){
 }
 async function cont(){
   try{await fetch('/api/continue',{method:'POST'});}catch(e){}
+}
+async function cancel(){
+  try{await fetch('/api/cancel',{method:'POST'});}catch(e){}
+  stop();
+  out.className='muted';out.innerHTML='Đã hủy. Bạn có thể dán link mới.';
 }
 function stop(){clearInterval(poll);poll=null;go.disabled=false;}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -238,6 +256,36 @@ def api_continue():
         _GATE.release()
         return {"ok": True}
     return {"ok": False, "reason": "not waiting"}
+
+
+@app.post("/api/cancel")
+def api_cancel():
+    global _current_task
+    _cancel_event.set()
+    proc = _proc_holder.get("proc")
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+    if _GATE is not None:
+        try:
+            _GATE.release()
+        except Exception:
+            pass
+    if _current_task is not None and not _current_task.done():
+        _current_task.cancel()
+    _set_idle()
+    return {"ok": True}
 
 
 # ---------- noVNC: WS proxy → VNC server (manual mode remote, cùng port với app) ----------

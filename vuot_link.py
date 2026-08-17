@@ -135,6 +135,24 @@ def port_open(port: int, timeout: float = 30.0) -> bool:
     return False
 
 
+def clean_stale_locks(profile_dir: str):
+    """Xoá lock cũ của Chrome (SingletonLock/Cookie/Socket) do lần force-kill
+    trước để lại — nếu không Chrome kế tiếp sẽ không mở được debug port."""
+    try:
+        p = Path(profile_dir)
+        if not p.is_dir():
+            return
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+            f = p / name
+            try:
+                if f.exists() or f.is_symlink():
+                    f.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def launch_browser(profile: str, port: int, headless: bool,
                    invisible: bool = False, proxy: str | None = None) -> subprocess.Popen:
     exe = find_browser()
@@ -396,6 +414,11 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
 
     found = {"url": None}
 
+    cancel_event = getattr(args, "cancel_event", None)
+
+    def is_cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+
     def check(u):
         if u and not is_interstitial(u) and u.startswith("http"):
             found["url"] = u
@@ -418,6 +441,8 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
         # Mở link đầu với retry: proxy/redirect lần đầu hay gặp error page
         # (ERR_UNEXPECTED = "error code 9"); reload lại thì vào bình thường.
         for attempt in range(1, 4):
+            if is_cancelled():
+                break
             try:
                 log(f"→ Mở: {url}" + (f" (thử {attempt})" if attempt > 1 else ""))
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -441,6 +466,9 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
         error_reloads = 0
 
         while time.time() < deadline:
+            if is_cancelled():
+                log("  ~ đã hủy bởi người dùng.")
+                break
             # Tự phục hồi nếu trang rơi vào error page giữa chừng.
             if is_error_page(page):
                 error_reloads += 1
@@ -469,7 +497,7 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
                 return ext
 
             def is_done():
-                return bool(found["url"] or find_dest_in_pages(ctx))
+                return bool(found["url"] or find_dest_in_pages(ctx) or is_cancelled())
 
             btn = button_state(page)
             sig = json.dumps(btn, sort_keys=True) if btn else "no-btn"
@@ -542,6 +570,8 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
                     t0 = time.time()
                     nav_seen = False
                     while time.time() < deadline:
+                        if is_cancelled():
+                            break
                         d = find_dest_in_pages(ctx) or found["url"]
                         if d:
                             return d
@@ -604,17 +634,20 @@ def bypass_url(url: str, profile_dir: str | None = None, headless: bool = False,
                invisible: bool = False, proxy: str | None = None,
                timeout: float = 180.0, manual: bool = False, no_text: bool = False,
                log=print, keep_open: bool = False,
-               manual_gate=None) -> tuple[str | None, str | None]:
+               manual_gate=None, cancel_event=None, proc_holder=None) -> tuple[str | None, str | None]:
     """Vượt 1 link (cuty.io / shrinkme.click...), trả (link_đích, raw_text|None).
     Dùng lại được cho web app. `manual_gate`: đối tượng ManualGate (mặc định CLI input
     nếu manual=True mà không truyền gate)."""
     profile_dir = profile_dir or str(Path.home() / ".vuot-link-profile")
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    clean_stale_locks(profile_dir)
     if not url.startswith("http"):
         url = "https://" + url
     gate = manual_gate or (ManualGate(log) if manual else None)
     port = free_port()
     proc = launch_browser(profile_dir, port, headless, invisible, proxy)
+    if proc_holder is not None:
+        proc_holder["proc"] = proc
     try:
         if not port_open(port, 30):
             log("Không mở được debug port Chrome.")
@@ -622,7 +655,7 @@ def bypass_url(url: str, profile_dir: str | None = None, headless: bool = False,
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            args_ns = SimpleNamespace(manual=manual, timeout=timeout, gate=gate)
+            args_ns = SimpleNamespace(manual=manual, timeout=timeout, gate=gate, cancel_event=cancel_event)
             dest = bypass_one(ctx, url, args_ns, log)
             raw = None
             if dest and not no_text:
@@ -633,6 +666,8 @@ def bypass_url(url: str, profile_dir: str | None = None, headless: bool = False,
                 pass
         return (dest, raw)
     finally:
+        if proc_holder is not None and proc_holder.get("proc") is proc:
+            proc_holder.pop("proc", None)
         if not keep_open:
             try:
                 proc.terminate()
