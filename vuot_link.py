@@ -36,6 +36,7 @@ Cài đặt:
   (Cần Chrome/Chromium. Trên Linux: apt-get install chromium, hoặc set CHROME_PATH.)
 """
 import argparse
+import base64
 import json
 import os
 import socket
@@ -355,6 +356,25 @@ def click_recaptcha_anchor(page) -> bool:
     return False
 
 
+def skip_adlinkfly_timer(page):
+    """Tua countdown AdLinkFly (shrinkme.click/.io...): ép app_vars.force_wait /
+    counter = 0 → nút 'Get Link' enable ngay thay vì chờ ~10s. Inert trên cuty
+    (không có app_vars → no-op). Gọi mỗi vòng lặp."""
+    try:
+        page.evaluate(r"""() => {
+            try {
+                if (typeof app_vars !== 'undefined') {
+                    if ('force_wait' in app_vars) app_vars.force_wait = 0;
+                    if ('counter' in app_vars) app_vars.counter = 0;
+                    if ('timer' in app_vars) app_vars.timer = 0;
+                }
+                if (typeof window.counter !== 'undefined') window.counter = 0;
+            } catch (e) {}
+        }""")
+    except Exception:
+        pass
+
+
 def find_dest_in_pages(ctx) -> str | None:
     """Quét tất cả tab (kể cả popup) tìm URL đã rời host interstitial."""
     try:
@@ -533,6 +553,37 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
     except Exception:
         pass
 
+    # AdLinkFly / shrinkme: bắt response AJAX (links/go2 / get_link) trả JSON
+    # {"url": ...} → lấy link đích trực tiếp (nhanh + chắc hơn chờ redirect). Inert
+    # trên cuty (không có endpoint này).
+    def on_response(resp):
+        try:
+            u = resp.url or ""
+            if not (("links/go2" in u) or ("/links/go" in u) or ("get_link" in u)):
+                return
+            data = resp.json()
+            if not isinstance(data, dict):
+                return
+            dest = data.get("url") or data.get("link") or data.get("destination")
+            if isinstance(dest, str) and dest.startswith("http") and not is_interstitial(dest):
+                found["url"] = dest
+                return
+            # AdLinkFly hay trả url base64.
+            if isinstance(dest, str) and dest:
+                try:
+                    dec = base64.b64decode(dest, validate=True).decode("utf-8", "ignore")
+                except Exception:
+                    dec = ""
+                if dec.startswith("http") and not is_interstitial(dec):
+                    found["url"] = dec
+        except Exception:
+            pass
+
+    try:
+        page.on("response", on_response)
+    except Exception:
+        pass
+
     try:
         # Mở link đầu với retry: proxy/redirect lần đầu hay gặp error page
         # (ERR_UNEXPECTED = "error code 9", renderer crash do ads OOM). Reload ngay
@@ -575,6 +626,7 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
                     log(f"  ! reload lỗi: {e!r}")
                 time.sleep(5)
                 continue
+            skip_adlinkfly_timer(page)
             d = find_dest_in_pages(ctx) or found["url"]
             if d:
                 return d
