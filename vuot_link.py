@@ -108,6 +108,58 @@ def is_error_page(page) -> bool:
     return u.startswith("chrome-error://") or "chromewebdata" in u
 
 
+# Quảng cáo nặng trên cuty.io/cuttty.com (Netpub, CleverCore, AdsCoreLoader,
+# vaudona, llvpn, justkoalas) hay làm renderer Chrome crash vì OOM trên container
+# RAM thấp (Railway) → "Aw, snap! error code 9". Các domain này KHÔNG liên quan
+# tới vhit (/_v/s.js) hay Turnstile (cùng host cuty.io/cuttty.com/cdn.cuty.io),
+# nên block chúng không ảnh hưởng tới việc enable nút.
+HEAVY_AD_DOMAINS = (
+    "fstatic.netpub.media",        # Netpub banner ads (nhiều slot, nặng nhất)
+    "scripts.cleverwebserver.com",  # CleverCore loader (hay crash renderer)
+    "sads.adsboosters.xyz",         # AdsCoreLoader (hay crash renderer)
+    "kk.vaudona.com",               # popunder
+    "llvpn.com",                    # tag.min.js
+    "justkoalas.com",               # popstate redirect hijack
+)
+
+
+def setup_ad_blocking(context, log) -> bool:
+    """Block ad nặng qua route interception: fulfill rỗng (status 200, body rỗng)
+    thay vì abort → script vẫn "load" thành công (no-op), không trigger onerror,
+    khó bị phát hiện adblock. Trả True nếu thiết lập được.
+
+    Tắt bằng env BLOCK_ADS=0 (cho debug). Mặc định bật."""
+    if os.environ.get("BLOCK_ADS", "1") != "1":
+        return False
+
+    def handler(route):
+        try:
+            u = route.request.url
+        except Exception:
+            u = ""
+        if any(d in u for d in HEAVY_AD_DOMAINS):
+            try:
+                route.fulfill(status=200, body=b"", content_type="application/javascript")
+                return
+            except Exception:
+                try:
+                    route.abort()
+                except Exception:
+                    pass
+                return
+        try:
+            route.continue_()
+        except Exception:
+            pass
+
+    try:
+        context.route("**/*", handler)
+        return True
+    except Exception as e:
+        log(f"  ! không thiết lập được ad-block: {e!r}")
+        return False
+
+
 def find_browser() -> str:
     for c in BROWSER_CANDIDATES:
         if c and os.path.exists(c):
@@ -439,23 +491,20 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
 
     try:
         # Mở link đầu với retry: proxy/redirect lần đầu hay gặp error page
-        # (ERR_UNEXPECTED = "error code 9"); reload lại thì vào bình thường.
+        # (ERR_UNEXPECTED = "error code 9", renderer crash do ads OOM). Reload ngay
+        # thường crash lại (ads vẫn nặng) → chỉ goto lại sau khi chờ memory release.
         for attempt in range(1, 4):
             if is_cancelled():
                 break
             try:
-                log(f"→ Mở: {url}" + (f" (thử {attempt})" if attempt > 1 else ""))
+                log(f"→ Mở: {url}" + (f" (thử {attempt}/3)" if attempt > 1 else ""))
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 log(f"  ! goto lỗi: {e!r}")
             if not is_error_page(page):
                 break
-            log(f"  ~ error page (code) — reload thử {attempt}/3 ...")
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=60000)
-            except Exception as e:
-                log(f"  ! reload lỗi: {e!r}")
-            time.sleep(2)
+            log(f"  ~ error page (renderer crash?) — chờ 5s rồi goto lại ({attempt}/3) ...")
+            time.sleep(5)
 
         deadline = time.time() + args.timeout
         last_sig = None
@@ -480,7 +529,7 @@ def bypass_one(ctx, url: str, args, log) -> str | None:
                     page.reload(wait_until="domcontentloaded", timeout=60000)
                 except Exception as e:
                     log(f"  ! reload lỗi: {e!r}")
-                time.sleep(2)
+                time.sleep(5)
                 continue
             d = find_dest_in_pages(ctx) or found["url"]
             if d:
@@ -655,6 +704,8 @@ def bypass_url(url: str, profile_dir: str | None = None, headless: bool = False,
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            if setup_ad_blocking(ctx, log):
+                log("  • ad-block: đã block quảng cáo nặng (chống crash renderer OOM).")
             args_ns = SimpleNamespace(manual=manual, timeout=timeout, gate=gate, cancel_event=cancel_event)
             dest = bypass_one(ctx, url, args_ns, log)
             raw = None
@@ -696,8 +747,8 @@ def main():
                     help="Chạy headless (cảnh báo: Turnstile hay fail).")
     ap.add_argument("--manual", action="store_true",
                     help="Nếu auto trượt, dừng lại cho người dùng tự giải captcha trong Chrome.")
-    ap.add_argument("--timeout", type=float, default=180.0,
-                    help="Giới hạn thời gian mỗi link (giây). Mặc định: 180.")
+    ap.add_argument("--timeout", type=float, default=240.0,
+                    help="Giới hạn thời gian mỗi link (giây). Mặc định: 240.")
     ap.add_argument("--profile", default=None,
                     help="Thư mục profile. Mặc định: ~/.vuot-link-profile.")
     ap.add_argument("--proxy", default=None,

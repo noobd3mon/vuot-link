@@ -14,3 +14,6 @@ data/
 *.log
 .env
 .DS_Store
+
+# Debug dumps (file HTML/JS lớn dump khi đang reverse-engineer vhit/ads)
+_debug_*
