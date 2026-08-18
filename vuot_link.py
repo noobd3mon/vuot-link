@@ -160,6 +160,46 @@ def setup_ad_blocking(context, log) -> bool:
         return False
 
 
+# ---------- Stealth / cloak nhẹ (ẩn dấu automation khỏi Cloudflare Turnstile) ----------
+# Gate bằng env STEALTH (mặc định "1"). Tắt bằng STEALTH=0.
+# Lưu ý: đây chỉ là cloak fingerprint; Turnstile trên IP datacenter (Railway) vẫn
+# hay fail do IP reputation — fingerprint thường KHÔNG phải nguyên nhân chính.
+#
+# Thiết kế: chỉ dùng biện pháp NATIVE (không detectable):
+#   (1) flag --disable-blink-features=AutomationControlled (trong launch_browser) —
+#       gỡ navigator.webdriver ở mức Blink, getter vẫn native → Turnstile không phát hiện.
+#   (2) CDP Emulation.setUserAgentOverride — nếu UA là "Chromium" (binary trên Linux/
+#       Railway) → đổi thành "Chrome" ở mức network (header + Sec-CH-UA brand) nhất quán.
+# TẠM KHÔNG dùng init script (Object.defineProperty navigator.*) — đã test: các getter
+# non-native bị Turnstile phát hiện → Turnstile KHÔNG auto-pass (regression). Flag native
+# đã đủ ẩn navigator.webdriver mà không để lại dấu vết.
+
+
+def setup_stealth(context, log) -> bool:
+    """Cloak nhẹ NATIVE: nếu UA binary là 'Chromium' (Linux/Railway) → override thành
+    'Chrome' qua CDP Emulation.setUserAgentOverride (network header + Sec-CH-UA brand,
+    native, không detectable). Trả True nếu áp dụng (dù có override hay không, miễn
+    không lỗi). navigator.webdriver đã gỡ bằng flag --disable-blink-features trong
+    launch_browser (native, không cần init script)."""
+    if os.environ.get("STEALTH", "1") != "1":
+        return False
+    try:
+        page = context.pages[0] if context.pages else None
+        if page is None:
+            return True
+        real = page.evaluate("() => navigator.userAgent") or ""
+        if "Chromium" not in real:
+            return True                  # đã là Chrome (local Win/Mac) → không cần override
+        ua = real.replace("Chromium", "Chrome", 1)
+        sess = context.new_cdp_session(page)
+        sess.send("Emulation.setUserAgentOverride", {"userAgent": ua})
+        log(f"  • stealth: UA Chromium→Chrome (CDP): {ua[:60]}…")
+        return True
+    except Exception as e:
+        log(f"  ! stealth: lỗi override UA: {e!r}")
+        return False
+
+
 def find_browser() -> str:
     for c in BROWSER_CANDIDATES:
         if c and os.path.exists(c):
@@ -222,6 +262,10 @@ def launch_browser(profile: str, port: int, headless: bool,
         "--disable-dev-shm-usage",
         "--disable-gpu",            # container Linux không có GPU; vô hại trên Win/Mac
     ]
+    # Stealth: gỡ cờ automation Blink → navigator.webdriver=false (THE quan trọng nhất
+    # cho Turnstile). Gate bằng env STEALTH (mặc định "1").
+    if os.environ.get("STEALTH", "1") == "1":
+        args.append("--disable-blink-features=AutomationControlled")
     if proxy:
         args.append(f"--proxy-server={proxy}")
     if headless:
@@ -706,6 +750,8 @@ def bypass_url(url: str, profile_dir: str | None = None, headless: bool = False,
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
             if setup_ad_blocking(ctx, log):
                 log("  • ad-block: đã block quảng cáo nặng (chống crash renderer OOM).")
+            if setup_stealth(ctx, log):
+                log("  • stealth: đã gỡ navigator.webdriver (flag native) + UA Chromium→Chrome (CDP) nếu cần.")
             args_ns = SimpleNamespace(manual=manual, timeout=timeout, gate=gate, cancel_event=cancel_event)
             dest = bypass_one(ctx, url, args_ns, log)
             raw = None

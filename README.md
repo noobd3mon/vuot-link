@@ -27,6 +27,14 @@ không qua Playwright launch → Cloudflare/Google không phát hiện automatio
   error code 9") trên container RAM thấp (Railway). vhit (`/_v/s.js`) và Turnstile
   cùng host cuty.io nên KHÔNG bị block → nút vẫn enable bình thường. Tắt bằng
   `BLOCK_ADS=0` (mặc định bật).
+- **Cloak nhẹ (stealth)** khi `STEALTH=1` (mặc định): gỡ `navigator.webdriver` bằng
+  flag `--disable-blink-features=AutomationControlled` (native, không để lại dấu vết)
+  và nếu binary là `chromium` (Linux/Railway → UA "Chromium") thì override UA thành
+  "Chrome" qua CDP (network header + Sec-CH-UA brand nhất quán). **Chỉ dùng biện pháp
+  native** — KHÔNG dùng init script `Object.defineProperty(navigator.*)` vì Turnstile
+  phát hiện getter non-native → fail (đã test regression). Tắt bằng `STEALTH=0`.
+  ⚠️ Cloak fingerprint nhẹ thôi — Turnstile trên **IP datacenter** (Railway) vẫn hay
+  fail do IP reputation, không phải do fingerprint (xem lưu ý IP ở trên).
 
 ## Cài đặt (local)
 ```bash
@@ -84,7 +92,8 @@ Bấm **"Thêm vào hàng"**:
 
 Env: `PORT` (8080), `PROXY`, `PROFILE_DIR`, `TIMEOUT` (240), `NOVNC` (`1` bật noVNC),
 `NOVNC_DIR` (`/usr/share/novnc`), `VNC_HOST`/`VNC_PORT`, `BLOCK_ADS` (`1` mặc định —
-block quảng cáo nặng để chống crash renderer OOM trên container RAM thấp; `0` để tắt).
+block quảng cáo nặng để chống crash renderer OOM trên container RAM thấp; `0` để tắt),
+`STEALTH` (`1` mặc định — cloak nhẹ native: gỡ `navigator.webdriver` + UA Chromium→Chrome; `0` để tắt).
 
 ## Deploy Railway (hướng dẫn chi tiết)
 
@@ -164,6 +173,7 @@ curl "https://<app>.up.railway.app/api?url=https://cuty.io/xxxx"
 | Triệu chứng | Nguyên nhân | Cách xử lý |
 |-------------|-------------|------------|
 | `/api` trả `{"ok":false}` | IP datacenter bị chặn captcha | Set `PROXY` residential, hoặc dùng manual + noVNC |
+| Đã bật `STEALTH=1` mà Turnstile vẫn không pass | IP datacenter, **không phải fingerprint** — cloak không sửa được IP reputation | Set `PROXY` residential, hoặc dùng manual + noVNC |
 | "Aw, snap! error code 9" (renderer crash) | Ads nặng (Netpub/CleverCore/AdsCoreLoader...) OOM trên container RAM thấp | Đã tự block qua `BLOCK_ADS=1` (mặc định); nếu vẫn crash, nâng RAM plan hoặc set `BLOCK_ADS=1` rõ ràng |
 | Deploy fail, log `Xvfb failed` | Display ảo không khởi động được | Xem log `start.sh`, redeploy |
 | Build chậm | Đang cài Chromium | Bình thường ở lần đầu; chờ vài phút |
