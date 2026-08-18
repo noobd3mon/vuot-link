@@ -22,6 +22,11 @@ không qua Playwright launch → Cloudflare/Google không phát hiện automatio
 - **shrinkme.click**: reCAPTCHA — tool **click checkbox** tự động; chỉ tự pass
   khi IP/profile đủ trust, không thì bật **manual mode** để bạn giải tay.
 - Trên server không màn hình, chạy **headed dưới Xvfb** (headless fail).
+- **Block quảng cáo nặng** (Netpub/CleverCore/AdsCoreLoader/vaudona/llvpn/justkoalas)
+  qua route interception — các ads này hay làm renderer Chrome crash OOM ("Aw, snap!
+  error code 9") trên container RAM thấp (Railway). vhit (`/_v/s.js`) và Turnstile
+  cùng host cuty.io nên KHÔNG bị block → nút vẫn enable bình thường. Tắt bằng
+  `BLOCK_ADS=0` (mặc định bật).
 
 ## Cài đặt (local)
 ```bash
@@ -50,21 +55,36 @@ Tùy chọn: `--open --headless --manual --timeout --profile --proxy --keep-open
 ```bash
 python app.py          # mở http://localhost:8080
 ```
-Trang có ô nhập link + ô **"Manual nếu captcha k tự pass"**. Bấm "Lấy link":
-- Auto pass → ra link đích (+ raw text).
-- Nếu captcha không tự pass → hiện **"Cần giải captcha thủ công"** + nút
-  **"Đã giải — Tiếp tục"**. Giải trong cửa sổ Chrome đang mở rồi bấm nút → tool
-  tiếp tục.
+Trang có **ô dán nhiều link** (mỗi dòng 1 link) + ô **"Manual nếu captcha k tự pass"**.
+Bấm **"Thêm vào hàng"**:
+- Tool **xếp hàng xử lý tuần tự** 1 link/lần (Chrome tốn RAM). Trong khi 1 link
+  chạy, bạn cứ nộp thêm link vào hàng.
+- Mỗi link khi xong sẽ nằm trong bảng **Kết quả** (link đích + nút Copy + raw text
+  nếu có). Bấm **"Xóa kết quả"** để dọn.
+- Nếu 1 link cần captcha không tự pass → hiện **"Cần giải captcha thủ công"** +
+  nút **"Đã giải — Tiếp tục"** (giải trong Chrome/noVNC rồi bấm). Các link sau vẫn
+  chờ trong hàng.
+- **"Hủy & xóa hàng"**: dừng link đang chạy + xóa hết hàng chờ (kết quả đã có
+  vẫn giữ).
+
+> Lưu ý: queue + kết quả lưu **in-memory** — Railway restart (deploy/OOM/healthcheck
+> fail) thì mất hàng chờ lẫn kết quả. Nộp lại link nếu cần. Đây là đánh đổi để giữ
+> code đơn giản (không cần DB/file).
 
 ### API
-- `GET  /api/start?url=<link>&manual=1` → `{"started":true}` — chạy nền, trả ngay.
-- `GET  /api/status` → `{"status":"running|needs_manual|done|error","destination","raw_text","error","manual_msg","log":[...]}` — poll mỗi ~1.2s.
-- `POST /api/continue` → nhả manual gate (khi `status=needs_manual`).
+- `POST /api/queue` body `{"urls":["u1","u2"],"manual":true}` → `{"queued":N,"pending":M,"running":bool}` — nộp nhiều link.
+- `GET  /api/queue` → `{"current":{...},"pending":[...],"pending_count":N,"results":[...],"results_total":M,"running":bool}` — UI poll cái này mỗi ~1.5s.
+- `POST /api/queue/cancel` → hủy current + clear hàng chờ.
+- `POST /api/queue/clear-results` → xóa bảng kết quả.
+- `POST /api/continue` → nhả manual gate của link đang chạy.
+- `GET  /api/start?url=<link>&manual=1` → backward-compat (enqueue 1 link, không còn 409).
+- `GET  /api/status` → state của link đang chạy (script cũ).
 - `GET  /api?url=<link>` → blocking, auto-only (cho script): `{"ok":true,"destination","raw_text"}`.
 - `GET  /health` → `{"ok":true}`.
 
 Env: `PORT` (8080), `PROXY`, `PROFILE_DIR`, `TIMEOUT` (240), `NOVNC` (`1` bật noVNC),
-`NOVNC_DIR` (`/usr/share/novnc`), `VNC_HOST`/`VNC_PORT`.
+`NOVNC_DIR` (`/usr/share/novnc`), `VNC_HOST`/`VNC_PORT`, `BLOCK_ADS` (`1` mặc định —
+block quảng cáo nặng để chống crash renderer OOM trên container RAM thấp; `0` để tắt).
 
 ## Deploy Railway (hướng dẫn chi tiết)
 
@@ -144,9 +164,10 @@ curl "https://<app>.up.railway.app/api?url=https://cuty.io/xxxx"
 | Triệu chứng | Nguyên nhân | Cách xử lý |
 |-------------|-------------|------------|
 | `/api` trả `{"ok":false}` | IP datacenter bị chặn captcha | Set `PROXY` residential, hoặc dùng manual + noVNC |
+| "Aw, snap! error code 9" (renderer crash) | Ads nặng (Netpub/CleverCore/AdsCoreLoader...) OOM trên container RAM thấp | Đã tự block qua `BLOCK_ADS=1` (mặc định); nếu vẫn crash, nâng RAM plan hoặc set `BLOCK_ADS=1` rõ ràng |
 | Deploy fail, log `Xvfb failed` | Display ảo không khởi động được | Xem log `start.sh`, redeploy |
 | Build chậm | Đang cài Chromium | Bình thường ở lần đầu; chờ vài phút |
-| Hết RAM / bị kill | Chrome tốn RAM | Nâng RAM plan; chỉ chạy 1 link/lần |
+| Hết RAM / bị kill | Chrome tốn RAM | Nâng RAM plan; chỉ chạy 1 link/lần; giữ `BLOCK_ADS=1` |
 | Log `stage captcha: đợi...` rồi timeout | Turnstile không tự pass | Dùng manual mode + noVNC |
 
 ### Chạy thử local bằng Docker (trước khi đẩy Railway)
@@ -172,7 +193,7 @@ docker run --rm -p 8080:8080 -e NOVNC=1 vuot-link
 ## Cấu trúc
 ```
 vuot_link.py      — tool chính + hàm bypass_url() + ManualGate (dùng lại cho web)
-app.py            — web app FastAPI: trang nhập link, /api/start|status|continue,
+app.py            — web app FastAPI: queue UI + /api/queue|start|status|continue|cancel,
                     /vnc/ws (WS proxy VNC cho noVNC manual remote)
 Dockerfile        — image Railway (python + chromium + xvfb + x11vnc + novnc)
 start.sh          — khởi Xvfb (đợi sẵn sàng) + x11vnc + uvicorn (entrypoint Docker)
